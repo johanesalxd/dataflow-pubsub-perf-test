@@ -12,6 +12,7 @@
 #   4. BigQuery tables:
 #      - JSON pipeline: taxi_events_perf, taxi_events_perf_dlq
 #      - Avro pipeline:  taxi_events_perf_enroute, _pickup, _dropoff, _waiting
+#   5. Managed Kafka topic + cluster (round 6)
 #
 # Resources NOT deleted (shared across pipelines):
 #   - GCS bucket
@@ -30,6 +31,11 @@ BIGQUERY_DATASET="demo_dataset_asia"
 BIGQUERY_TABLE="taxi_events_perf"
 TOPIC="perf_test_topic"
 
+# Kafka configuration (round 6)
+KAFKA_CLUSTER="perf-test-kafka"
+KAFKA_LOCATION="${REGION}"
+KAFKA_TOPIC="perf-test-taxi-avro"
+
 # Consumer labels to clean up (covers a-h)
 LABELS=(a b c d e f g h)
 
@@ -46,12 +52,14 @@ fi
 echo "=== BQ Throughput Test Cleanup ==="
 echo ""
 echo "This will delete the following resources:"
-echo "  Dataflow jobs:   dataflow-perf-* (test, publisher, avro)"
+echo "  Dataflow jobs:   dataflow-perf-* (test, publisher, avro, kafka)"
 echo "  Subscriptions:   perf_test_sub_{a..h} (if they exist)"
 echo "  Topic:           ${TOPIC}"
 echo "  BigQuery tables: ${FULL_TABLE}"
 echo "                   ${FULL_TABLE}_dlq"
 echo "                   ${FULL_TABLE}_enroute, _pickup, _dropoff, _waiting"
+echo "  Kafka topic:     ${KAFKA_TOPIC} (in cluster ${KAFKA_CLUSTER})"
+echo "  Kafka cluster:   ${KAFKA_CLUSTER} (async deletion)"
 echo ""
 
 if [[ "${FORCE}" != true ]]; then
@@ -162,6 +170,34 @@ for STATUS in enroute pickup dropoff waiting; do
         echo "not found (skipping)."
     fi
 done
+
+# ===================================================================
+# Step 5: Delete Managed Kafka resources (round 6)
+# ===================================================================
+echo "--- Step 5: Delete Managed Kafka resources ---"
+
+echo -n "  Kafka topic: ${KAFKA_TOPIC} ... "
+if gcloud managed-kafka topics describe "${KAFKA_TOPIC}" \
+    --cluster="${KAFKA_CLUSTER}" --location="${KAFKA_LOCATION}" \
+    --project="${PROJECT_ID}" 2>/dev/null; then
+    gcloud managed-kafka topics delete "${KAFKA_TOPIC}" \
+        --cluster="${KAFKA_CLUSTER}" --location="${KAFKA_LOCATION}" \
+        --project="${PROJECT_ID}" --quiet 2>/dev/null
+    echo "deleted."
+else
+    echo "not found (skipping)."
+fi
+
+echo -n "  Kafka cluster: ${KAFKA_CLUSTER} ... "
+if gcloud managed-kafka clusters describe "${KAFKA_CLUSTER}" \
+    --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" 2>/dev/null; then
+    gcloud managed-kafka clusters delete "${KAFKA_CLUSTER}" \
+        --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" \
+        --quiet --async 2>/dev/null
+    echo "deletion started (async)."
+else
+    echo "not found (skipping)."
+fi
 
 echo ""
 echo "=== Cleanup Complete ==="

@@ -28,6 +28,11 @@
 #   ./run_perf_test.sh java-avro-job a   # launch Java Avro consumer Job A
 #   ./run_perf_test.sh dry-run-avro      # validate Avro sizes + expansion ratio
 #   ./run_perf_test.sh monitor           # print monitoring URLs
+#
+# Usage (Kafka pipeline -- round 6):
+#   ./run_perf_test.sh setup-kafka       # create Managed Kafka cluster + topic + BQ tables
+#   ./run_perf_test.sh kafka-publish     # launch Kafka Avro publisher
+#   ./run_perf_test.sh kafka-avro-job a  # launch Kafka Avro consumer Job A
 
 set -e
 
@@ -64,6 +69,15 @@ USE_AT_LEAST_ONCE=true
 # Topic/subscription names
 TOPIC="perf_test_topic"
 FULL_TOPIC="projects/${PROJECT_ID}/topics/${TOPIC}"
+
+# Kafka configuration (round 6)
+KAFKA_CLUSTER="perf-test-kafka"
+KAFKA_LOCATION="${REGION}"
+KAFKA_TOPIC="perf-test-taxi-avro"
+KAFKA_PARTITIONS=32
+KAFKA_REPLICATION_FACTOR=3
+KAFKA_VCPUS=3
+KAFKA_MEMORY="3GiB"
 
 # Consumer labels (a-h, extend if needed)
 LABELS=(a b c d e f g h)
@@ -647,6 +661,310 @@ do_java_avro_job() {
     echo ""
 }
 
+do_setup_kafka() {
+    print_config
+    echo "--- Setting up Kafka + GCP resources (Round 6) ---"
+    echo ""
+
+    # 1. Enable Managed Kafka API
+    echo "1. Enabling Managed Kafka API..."
+    gcloud services enable managedkafka.googleapis.com --project="${PROJECT_ID}"
+
+    # 2. GCS bucket
+    echo "2. Checking GCS bucket..."
+    if ! gsutil ls "${TEMP_BUCKET}" 2>/dev/null; then
+        echo "   Creating GCS bucket..."
+        gsutil mb -p "${PROJECT_ID}" -l "${REGION}" "${TEMP_BUCKET}"
+    else
+        echo "   GCS bucket already exists."
+    fi
+
+    # 3. BigQuery dataset
+    echo "3. Checking BigQuery dataset..."
+    if ! bq show --dataset "${PROJECT_ID}:${BIGQUERY_DATASET}" 2>/dev/null; then
+        echo "   Creating BigQuery dataset..."
+        bq mk --dataset --location="${REGION}" "${PROJECT_ID}:${BIGQUERY_DATASET}"
+    else
+        echo "   BigQuery dataset already exists."
+    fi
+
+    # 4. BigQuery typed tables (same schema as Avro round 5)
+    local AVRO_SCHEMA="subscription_name:STRING,message_id:STRING,publish_time:TIMESTAMP,processing_time:TIMESTAMP,ride_id:STRING,point_idx:INT64,latitude:FLOAT64,longitude:FLOAT64,timestamp:TIMESTAMP,meter_reading:FLOAT64,meter_increment:FLOAT64,ride_status:STRING,passenger_count:INT64,attributes:STRING"
+    local STATUSES=(enroute pickup dropoff waiting)
+
+    echo "4. Checking BigQuery typed tables (4 ride_status tables)..."
+    for STATUS in "${STATUSES[@]}"; do
+        local TABLE_NAME="${BIGQUERY_TABLE}_${STATUS}"
+        local FULL_STATUS_TABLE="${PROJECT_ID}:${BIGQUERY_DATASET}.${TABLE_NAME}"
+        if ! bq show "${FULL_STATUS_TABLE}" 2>/dev/null; then
+            echo "   Creating table: ${TABLE_NAME}"
+            bq mk \
+                --table \
+                --time_partitioning_field=publish_time \
+                --time_partitioning_type=DAY \
+                --clustering_fields=publish_time \
+                --schema="${AVRO_SCHEMA}" \
+                "${FULL_STATUS_TABLE}"
+        else
+            echo "   Table ${TABLE_NAME} already exists."
+        fi
+    done
+
+    # 5. BigQuery DLQ table
+    echo "5. Checking BigQuery DLQ table..."
+    if ! bq show "${FULL_TABLE}_dlq" 2>/dev/null; then
+        echo "   Creating BigQuery DLQ table..."
+        bq mk \
+            --table \
+            --time_partitioning_field=processing_time \
+            --time_partitioning_type=DAY \
+            --schema=processing_time:TIMESTAMP,error_message:STRING,stack_trace:STRING,original_payload:STRING,subscription_name:STRING \
+            "${FULL_TABLE}_dlq"
+    else
+        echo "   BigQuery DLQ table already exists."
+    fi
+
+    # 6. Create Managed Kafka cluster (~20-30 min)
+    echo "6. Creating Managed Kafka cluster..."
+    echo "   Cluster:    ${KAFKA_CLUSTER}"
+    echo "   Location:   ${KAFKA_LOCATION}"
+    echo "   vCPUs:      ${KAFKA_VCPUS}"
+    echo "   Memory:     ${KAFKA_MEMORY}"
+    echo ""
+    if gcloud managed-kafka clusters describe "${KAFKA_CLUSTER}" \
+        --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" 2>/dev/null; then
+        echo "   Cluster already exists."
+    else
+        echo "   Creating cluster (this takes ~20-30 minutes)..."
+        gcloud managed-kafka clusters create "${KAFKA_CLUSTER}" \
+            --location="${KAFKA_LOCATION}" \
+            --project="${PROJECT_ID}" \
+            --cpu="${KAFKA_VCPUS}" \
+            --memory="${KAFKA_MEMORY}" \
+            --subnets="projects/${PROJECT_ID}/regions/${REGION}/subnetworks/default" \
+            --auto-rebalance \
+            --async
+        echo "   Cluster creation started (async)."
+        echo "   Wait for ACTIVE state before creating topics."
+        echo ""
+        echo "   Check status:"
+        echo "     gcloud managed-kafka clusters describe ${KAFKA_CLUSTER} \\"
+        echo "       --location=${KAFKA_LOCATION} --project=${PROJECT_ID} \\"
+        echo "       --format='value(state)'"
+        echo ""
+        echo "   Re-run this command after the cluster is ACTIVE to create"
+        echo "   the topic and complete setup."
+        return
+    fi
+
+    # 7. Create Kafka topic (only if cluster is ready)
+    echo "7. Creating Kafka topic..."
+    echo "   Topic:       ${KAFKA_TOPIC}"
+    echo "   Partitions:  ${KAFKA_PARTITIONS}"
+    echo "   Replication:  ${KAFKA_REPLICATION_FACTOR}"
+    if gcloud managed-kafka topics describe "${KAFKA_TOPIC}" \
+        --cluster="${KAFKA_CLUSTER}" --location="${KAFKA_LOCATION}" \
+        --project="${PROJECT_ID}" 2>/dev/null; then
+        echo "   Topic already exists."
+    else
+        gcloud managed-kafka topics create "${KAFKA_TOPIC}" \
+            --cluster="${KAFKA_CLUSTER}" \
+            --location="${KAFKA_LOCATION}" \
+            --project="${PROJECT_ID}" \
+            --partitions="${KAFKA_PARTITIONS}" \
+            --replication-factor="${KAFKA_REPLICATION_FACTOR}"
+        echo "   Topic created."
+    fi
+
+    # 8. Grant Managed Kafka client role to default compute SA
+    echo "8. Granting Managed Kafka client role..."
+    local WORKER_SA
+    WORKER_SA=$(gcloud iam service-accounts list \
+        --project="${PROJECT_ID}" \
+        --filter="email~compute@developer.gserviceaccount.com" \
+        --format="value(email)" | head -1)
+    if [[ -n "${WORKER_SA}" ]]; then
+        gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+            --member="serviceAccount:${WORKER_SA}" \
+            --role="roles/managedkafka.client" \
+            --condition=None \
+            --quiet 2>/dev/null
+        echo "   Granted roles/managedkafka.client to ${WORKER_SA}"
+    else
+        echo "   WARNING: Could not find default compute SA."
+        echo "   Manually grant roles/managedkafka.client to your Dataflow worker SA."
+    fi
+
+    # 9. Build Java JAR
+    echo "9. Building Java pipeline JAR..."
+    mvn -f java/pom.xml clean package -DskipTests
+    if [[ ! -f "${JAR_FILE}" ]]; then
+        echo "   ERROR: JAR file not found at ${JAR_FILE}"
+        exit 1
+    fi
+    echo "   Built: ${JAR_FILE}"
+
+    # 10. Get bootstrap address
+    echo ""
+    echo "10. Getting bootstrap address..."
+    local BOOTSTRAP
+    BOOTSTRAP=$(gcloud managed-kafka clusters describe "${KAFKA_CLUSTER}" \
+        --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" \
+        --format="value(bootstrapAddress)" 2>/dev/null || echo "PENDING")
+
+    echo ""
+    echo "=== Kafka Setup Complete ==="
+    echo ""
+    echo "  Bootstrap server: ${BOOTSTRAP}"
+    echo ""
+    echo "  IMPORTANT: Update KAFKA_BOOTSTRAP in this script, or pass"
+    echo "  --bootstrapServer on the command line."
+    echo ""
+    echo "Next steps:"
+    echo "  1. Publish:         ./run_perf_test.sh kafka-publish"
+    echo "  2. Check status:    ./run_perf_test.sh publish-status"
+    echo "  3. Launch Job A:    ./run_perf_test.sh kafka-avro-job a"
+    echo "  4. Wait 10 min for baseline"
+    echo "  5. Launch Job B:    ./run_perf_test.sh kafka-avro-job b"
+    echo "  6. Monitor:         ./run_perf_test.sh monitor"
+    echo ""
+}
+
+do_kafka_publish() {
+    # Verify JAR exists
+    if [[ ! -f "${JAR_FILE}" ]]; then
+        echo "ERROR: JAR file not found at ${JAR_FILE}"
+        echo "       Run './run_perf_test.sh setup-kafka' first."
+        exit 1
+    fi
+
+    # Get bootstrap address
+    local BOOTSTRAP
+    BOOTSTRAP=$(gcloud managed-kafka clusters describe "${KAFKA_CLUSTER}" \
+        --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" \
+        --format="value(bootstrapAddress)" 2>/dev/null)
+
+    if [[ -z "${BOOTSTRAP}" ]]; then
+        echo "ERROR: Could not get bootstrap address for cluster ${KAFKA_CLUSTER}."
+        echo "       Ensure the cluster is ACTIVE."
+        exit 1
+    fi
+
+    local JOB_NAME="dataflow-perf-kafka-publisher-$(date +%Y%m%d-%H%M%S)"
+    local AVRO_MSG_SIZE=85
+    local TOTAL_GB=$(( NUM_MESSAGES * AVRO_MSG_SIZE / 1000000000 ))
+
+    echo "=== Launching Kafka Avro Publisher ==="
+    echo "  Job name:     ${JOB_NAME}"
+    echo "  Bootstrap:    ${BOOTSTRAP}"
+    echo "  Topic:        ${KAFKA_TOPIC}"
+    echo "  Format:       avro (~${AVRO_MSG_SIZE} bytes/msg)"
+    echo "  Messages:     ${NUM_MESSAGES}"
+    echo "  Total data:   ~${TOTAL_GB} GB"
+    echo "  Workers:      ${PUBLISHER_NUM_WORKERS}x ${PUBLISHER_MACHINE_TYPE}"
+    echo ""
+    echo "  This is a BATCH job. It will auto-terminate after publishing."
+    echo ""
+
+    java -cp "${JAR_FILE}" com.johanesalxd.KafkaAvroPublisher \
+        --runner=DataflowRunner \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --jobName="${JOB_NAME}" \
+        --tempLocation="${TEMP_BUCKET}/temp" \
+        --stagingLocation="${TEMP_BUCKET}/staging" \
+        --bootstrapServer="${BOOTSTRAP}" \
+        --kafkaTopic="${KAFKA_TOPIC}" \
+        --numMessages="${NUM_MESSAGES}" \
+        --workerMachineType="${PUBLISHER_MACHINE_TYPE}" \
+        --numWorkers="${PUBLISHER_NUM_WORKERS}" \
+        --maxNumWorkers="${PUBLISHER_NUM_WORKERS}" \
+        --network=default \
+        --subnetwork="regions/${REGION}/subnetworks/default"
+
+    echo ""
+    echo "=== Kafka Publisher Job Submitted ==="
+    echo ""
+    echo "Check status:"
+    echo "  ./run_perf_test.sh publish-status"
+    echo ""
+    echo "View job at:"
+    echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
+    echo ""
+}
+
+do_kafka_avro_job() {
+    local LABEL="$1"
+
+    # Validate label
+    if [[ -z "${LABEL}" ]]; then
+        echo "ERROR: Job label required. Usage: $0 kafka-avro-job <a|b|c|d|...>"
+        exit 1
+    fi
+
+    # Verify JAR exists
+    if [[ ! -f "${JAR_FILE}" ]]; then
+        echo "ERROR: JAR file not found at ${JAR_FILE}"
+        echo "       Run './run_perf_test.sh setup-kafka' first."
+        exit 1
+    fi
+
+    # Get bootstrap address
+    local BOOTSTRAP
+    BOOTSTRAP=$(gcloud managed-kafka clusters describe "${KAFKA_CLUSTER}" \
+        --location="${KAFKA_LOCATION}" --project="${PROJECT_ID}" \
+        --format="value(bootstrapAddress)" 2>/dev/null)
+
+    if [[ -z "${BOOTSTRAP}" ]]; then
+        echo "ERROR: Could not get bootstrap address for cluster ${KAFKA_CLUSTER}."
+        echo "       Ensure the cluster is ACTIVE."
+        exit 1
+    fi
+
+    local CONSUMER_GROUP="perf-${LABEL}"
+    local JOB_NAME="dataflow-perf-kafka-avro-${LABEL}-$(date +%Y%m%d-%H%M%S)"
+
+    echo "=== Launching Kafka Avro Consumer Job ${LABEL^^} ==="
+    echo "  Job name:        ${JOB_NAME}"
+    echo "  Bootstrap:       ${BOOTSTRAP}"
+    echo "  Topic:           ${KAFKA_TOPIC}"
+    echo "  Consumer group:  ${CONSUMER_GROUP}"
+    echo "  Workers:         ${JAVA_CONSUMER_NUM_WORKERS}x ${JAVA_CONSUMER_MACHINE_TYPE}"
+    echo "  Write method:    STORAGE_API_AT_LEAST_ONCE"
+    echo "  Connection pool: enabled"
+    echo "  Dynamic routing: ride_status -> 4 tables"
+    echo "  BQ table base:   ${FULL_TABLE}"
+    echo ""
+
+    java -cp "${JAR_FILE}" com.johanesalxd.KafkaToBigQueryAvro \
+        --runner=DataflowRunner \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --jobName="${JOB_NAME}" \
+        --tempLocation="${TEMP_BUCKET}/temp" \
+        --stagingLocation="${TEMP_BUCKET}/staging" \
+        --bootstrapServer="${BOOTSTRAP}" \
+        --kafkaTopic="${KAFKA_TOPIC}" \
+        --consumerGroup="${CONSUMER_GROUP}" \
+        --outputTableBase="${FULL_TABLE}" \
+        --consumerGroupName="${CONSUMER_GROUP}" \
+        --streaming \
+        --experiments=use_runner_v2 \
+        --workerMachineType="${JAVA_CONSUMER_MACHINE_TYPE}" \
+        --numWorkers="${JAVA_CONSUMER_NUM_WORKERS}" \
+        --maxNumWorkers="${JAVA_CONSUMER_NUM_WORKERS}" \
+        --enableStreamingEngine \
+        --network=default \
+        --subnetwork="regions/${REGION}/subnetworks/default"
+
+    echo ""
+    echo "=== Kafka Avro Consumer Job ${LABEL^^} Submitted ==="
+    echo ""
+    echo "View job at:"
+    echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
+    echo ""
+}
+
 do_monitor() {
     print_config
     echo "--- Console Links ---"
@@ -765,6 +1083,15 @@ case "${COMMAND}" in
     java-avro-job)
         do_java_avro_job "${2}"
         ;;
+    setup-kafka)
+        do_setup_kafka
+        ;;
+    kafka-publish)
+        do_kafka_publish
+        ;;
+    kafka-avro-job)
+        do_kafka_avro_job "${2}"
+        ;;
     monitor)
         do_monitor
         ;;
@@ -792,8 +1119,24 @@ case "${COMMAND}" in
         echo "  java-avro-job <label> Launch Java Avro consumer with dynamic routing"
         echo "  dry-run-avro         Validate Avro message sizes and expansion ratio"
         echo ""
+        echo "Commands (Kafka pipeline -- round 6):"
+        echo "  setup-kafka            Create Managed Kafka cluster + topic + BQ tables + JAR"
+        echo "  kafka-publish          Launch Kafka Avro publisher (batch, ~85 bytes/msg)"
+        echo "  kafka-avro-job <label> Launch Kafka Avro consumer (separate consumer groups)"
+        echo ""
         echo "Common:"
         echo "  monitor          Print monitoring URLs and metric names"
+        echo ""
+        echo "Typical workflow (Kafka source -- round 6):"
+        echo "  1. ./run_perf_test.sh setup-kafka"
+        echo "  2. Wait for cluster ACTIVE (~20-30 min), re-run setup-kafka"
+        echo "  3. ./run_perf_test.sh kafka-publish"
+        echo "  4. ./run_perf_test.sh publish-status        # wait for Done"
+        echo "  5. ./run_perf_test.sh kafka-avro-job a       # Phase 1: baseline"
+        echo "  6. Wait 10 min for steady state"
+        echo "  7. ./run_perf_test.sh kafka-avro-job b       # Phase 2: noisy neighbor"
+        echo "  8. ./run_perf_test.sh monitor"
+        echo "  9. ./cleanup_perf_test.sh"
         echo ""
         echo "Typical workflow (Avro + dynamic routing -- round 5):"
         echo "  1. ./run_perf_test.sh setup-avro"
