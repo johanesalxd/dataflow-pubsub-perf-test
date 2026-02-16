@@ -42,6 +42,26 @@
             <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
             <version>${beam.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-sdks-java-io-kafka</artifactId>
+            <version>${beam.version}</version>
+        </dependency>
+
+        <!-- Kafka client (3.7.0+ required for Managed Kafka ADC auth) -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>3.7.1</version>
+        </dependency>
+
+        <!-- Managed Kafka auth handler -->
+        <dependency>
+            <groupId>com.google.cloud.hosted.kafka</groupId>
+            <artifactId>managed-kafka-auth-login-handler</artifactId>
+            <version>1.0.5</version>
+            <scope>runtime</scope>
+        </dependency>
 
         <!-- Avro -->
         <dependency>

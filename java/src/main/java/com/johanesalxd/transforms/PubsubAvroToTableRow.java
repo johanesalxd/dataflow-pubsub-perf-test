@@ -2,6 +2,8 @@ package com.johanesalxd.transforms;
 
 import com.google.api.services.bigquery.model.TableRow;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
@@ -40,30 +42,8 @@ public class PubsubAvroToTableRow extends DoFn<PubsubMessage, KV<String, TableRo
       new TupleTag<KV<String, TableRow>>() {};
   public static final TupleTag<TableRow> DLQ_TAG = new TupleTag<TableRow>() {};
 
-  /**
-   * Avro schema JSON matching schemas/taxi_ride_v1.avsc.
-   *
-   * <p>Embedded as a constant so the schema is available on Dataflow workers
-   * without needing to distribute .avsc files. The consumer knows the schema
-   * a priori, matching the Kafka + Schema Registry pattern where schema is
-   * cached on the consumer side.
-   */
-  private static final String AVRO_SCHEMA_JSON =
-      "{"
-          + "\"type\":\"record\","
-          + "\"name\":\"TaxiRide\","
-          + "\"namespace\":\"com.example.taxi\","
-          + "\"fields\":["
-          + "{\"name\":\"ride_id\",\"type\":\"string\"},"
-          + "{\"name\":\"point_idx\",\"type\":\"int\"},"
-          + "{\"name\":\"latitude\",\"type\":\"double\"},"
-          + "{\"name\":\"longitude\",\"type\":\"double\"},"
-          + "{\"name\":\"timestamp\",\"type\":{\"type\":\"string\",\"logicalType\":\"iso-datetime\"}},"
-          + "{\"name\":\"meter_reading\",\"type\":\"double\"},"
-          + "{\"name\":\"meter_increment\",\"type\":\"double\"},"
-          + "{\"name\":\"ride_status\",\"type\":\"string\"},"
-          + "{\"name\":\"passenger_count\",\"type\":\"int\"}"
-          + "]}";
+  /** Classpath resource path for the taxi ride Avro schema. */
+  private static final String SCHEMA_RESOURCE = "/taxi_ride_v1.avsc";
 
   private final String subscriptionName;
 
@@ -81,7 +61,15 @@ public class PubsubAvroToTableRow extends DoFn<PubsubMessage, KV<String, TableRo
 
   @Setup
   public void setup() {
-    avroSchema = new Schema.Parser().parse(AVRO_SCHEMA_JSON);
+    try (InputStream is = getClass().getResourceAsStream(SCHEMA_RESOURCE)) {
+      if (is == null) {
+        throw new IllegalStateException(
+            "Avro schema resource not found: " + SCHEMA_RESOURCE);
+      }
+      avroSchema = new Schema.Parser().parse(is);
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to load Avro schema", e);
+    }
     datumReader = new GenericDatumReader<>(avroSchema);
   }
 
