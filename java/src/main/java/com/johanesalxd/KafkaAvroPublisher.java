@@ -1,6 +1,7 @@
 package com.johanesalxd;
 
 import com.johanesalxd.transforms.SyntheticAvroGenerator;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -85,7 +86,8 @@ public class KafkaAvroPublisher {
 
       for (int i = 0; i < numMessages; i++) {
         byte[] message = pool.get(i % poolSize);
-        context.output(KV.of(new byte[0], message));
+        byte[] key = ByteBuffer.allocate(4).putInt(i).array();
+        context.output(KV.of(key, message));
       }
     }
   }

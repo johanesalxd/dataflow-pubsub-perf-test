@@ -2,7 +2,10 @@ package com.johanesalxd;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
@@ -76,6 +79,11 @@ public class KafkaAvroPublisherTest {
                 if (kv.getKey() == null) {
                   throw new AssertionError("Key must not be null");
                 }
+                if (kv.getKey().length == 0) {
+                  throw new AssertionError(
+                      "Key must not be empty (causes all messages "
+                          + "to land on one partition)");
+                }
                 if (kv.getValue() == null) {
                   throw new AssertionError("Value must not be null");
                 }
@@ -143,6 +151,38 @@ public class KafkaAvroPublisherTest {
               }
               if (count != 5) {
                 throw new AssertionError("Expected 5 messages, got " + count);
+              }
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testGenerateAvroBatchFnDistinctKeys() {
+    // Verify keys are distinct so Kafka distributes across partitions.
+    // With the old new byte[0] key, all keys were identical and all
+    // messages landed on a single partition.
+    PCollection<KV<byte[], byte[]>> output =
+        pipeline
+            .apply(Create.of(KV.of(0, 32)))
+            .apply(ParDo.of(new KafkaAvroPublisher.GenerateAvroBatchFn()));
+
+    PAssert.that(output)
+        .satisfies(
+            records -> {
+              Set<String> uniqueKeys = new HashSet<>();
+              for (KV<byte[], byte[]> kv : records) {
+                uniqueKeys.add(Arrays.toString(kv.getKey()));
+              }
+              if (uniqueKeys.size() < 2) {
+                throw new AssertionError(
+                    "Expected distinct keys for partition distribution, "
+                        + "but all keys were identical");
+              }
+              if (uniqueKeys.size() != 32) {
+                throw new AssertionError(
+                    "Expected 32 distinct keys, got " + uniqueKeys.size());
               }
               return null;
             });
