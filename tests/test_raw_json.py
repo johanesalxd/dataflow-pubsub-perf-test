@@ -50,9 +50,11 @@ def test_process_valid_message():
         # Check success output
         assert_that(
             results.success,
-            lambda elements: len(elements) == 1
-            and json.loads(elements[0]["payload"]) == payload
-            and elements[0]["subscription_name"] == subscription,
+            lambda elements: (
+                len(elements) == 1
+                and json.loads(elements[0]["payload"]) == payload
+                and elements[0]["subscription_name"] == subscription
+            ),
             label="CheckSuccess",
         )
 
@@ -103,8 +105,9 @@ def test_process_preserves_raw_formatting():
         # Check success output matches RAW string exactly (no normalization)
         assert_that(
             results.success,
-            lambda elements: len(elements) == 1
-            and elements[0]["payload"] == raw_payload,
+            lambda elements: (
+                len(elements) == 1 and elements[0]["payload"] == raw_payload
+            ),
             label="CheckRawPreservation",
         )
 

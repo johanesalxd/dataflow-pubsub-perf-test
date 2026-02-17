@@ -473,7 +473,7 @@ do_job() {
         exit 1
     fi
 
-    echo "=== Launching Consumer Job ${LABEL^^} ==="
+    echo "=== Launching Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') ==="
     echo "  Job name:     ${JOB_NAME}"
     echo "  Subscription: ${FULL_SUB}"
     echo "  Workers:      ${CONSUMER_NUM_WORKERS}x ${CONSUMER_MACHINE_TYPE}"
@@ -502,7 +502,7 @@ do_job() {
         --enable_streaming_engine
 
     echo ""
-    echo "=== Consumer Job ${LABEL^^} Submitted ==="
+    echo "=== Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') Submitted ==="
     echo ""
     echo "View job at:"
     echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
@@ -563,7 +563,7 @@ do_java_job() {
         exit 1
     fi
 
-    echo "=== Launching Java Consumer Job ${LABEL^^} ==="
+    echo "=== Launching Java Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') ==="
     echo "  Job name:       ${JOB_NAME}"
     echo "  Subscription:   ${FULL_SUB}"
     echo "  Workers:        ${JAVA_CONSUMER_NUM_WORKERS}x ${JAVA_CONSUMER_MACHINE_TYPE}"
@@ -591,7 +591,7 @@ do_java_job() {
         --useStorageApiConnectionPool=true
 
     echo ""
-    echo "=== Java Consumer Job ${LABEL^^} Submitted ==="
+    echo "=== Java Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') Submitted ==="
     echo ""
     echo "View job at:"
     echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
@@ -625,7 +625,7 @@ do_java_avro_job() {
         exit 1
     fi
 
-    echo "=== Launching Java Avro Consumer Job ${LABEL^^} ==="
+    echo "=== Launching Java Avro Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') ==="
     echo "  Job name:        ${JOB_NAME}"
     echo "  Subscription:    ${FULL_SUB}"
     echo "  Workers:         ${JAVA_CONSUMER_NUM_WORKERS}x ${JAVA_CONSUMER_MACHINE_TYPE}"
@@ -654,7 +654,7 @@ do_java_avro_job() {
         --useStorageApiConnectionPool=true
 
     echo ""
-    echo "=== Java Avro Consumer Job ${LABEL^^} Submitted ==="
+    echo "=== Java Avro Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') Submitted ==="
     echo ""
     echo "View job at:"
     echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
@@ -924,7 +924,7 @@ do_kafka_avro_job() {
     local CONSUMER_GROUP="perf-${LABEL}"
     local JOB_NAME="dataflow-perf-kafka-avro-${LABEL}-$(date +%Y%m%d-%H%M%S)"
 
-    echo "=== Launching Kafka Avro Consumer Job ${LABEL^^} ==="
+    echo "=== Launching Kafka Avro Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') ==="
     echo "  Job name:        ${JOB_NAME}"
     echo "  Bootstrap:       ${BOOTSTRAP}"
     echo "  Topic:           ${KAFKA_TOPIC}"
@@ -958,7 +958,7 @@ do_kafka_avro_job() {
         --subnetwork="regions/${REGION}/subnetworks/default"
 
     echo ""
-    echo "=== Kafka Avro Consumer Job ${LABEL^^} Submitted ==="
+    echo "=== Kafka Avro Consumer Job $(echo "${LABEL}" | tr '[:lower:]' '[:upper:]') Submitted ==="
     echo ""
     echo "View job at:"
     echo "  https://console.cloud.google.com/dataflow/jobs/${REGION}?project=${PROJECT_ID}"
