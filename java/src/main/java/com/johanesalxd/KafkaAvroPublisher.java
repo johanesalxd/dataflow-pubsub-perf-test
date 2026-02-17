@@ -143,7 +143,8 @@ public class KafkaAvroPublisher {
                 .withBootstrapServers(bootstrapServer)
                 .withTopic(kafkaTopic)
                 .withKeySerializer(ByteArraySerializer.class)
-                .withValueSerializer(ByteArraySerializer.class));
+                .withValueSerializer(ByteArraySerializer.class)
+                .withGCPApplicationDefaultCredentials());
 
     pipeline.run();
   }
