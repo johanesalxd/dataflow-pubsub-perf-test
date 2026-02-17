@@ -5,8 +5,8 @@ Operational guide for AI coding agents working in this repository.
 ## Project Overview
 
 Performance test infrastructure for reproducing BigQuery Storage Write API
-"Noisy Neighbor" throughput degradation with Dataflow and Pub/Sub. Dual-language:
-Python (primary) and Java (comparison). Both use Apache Beam 2.70.0.
+"Noisy Neighbor" throughput degradation with Dataflow. Dual-language (Python
+and Java), dual-source (Pub/Sub and Kafka). Both SDKs use Apache Beam 2.70.0.
 
 ## Build / Lint / Test
 
@@ -39,8 +39,11 @@ uv run pytest -k "avro"
 # Compile
 mvn compile
 
-# Run tests
+# Run tests (20 tests)
 mvn test
+
+# Run a single test class
+mvn test -Dtest=SyntheticAvroGeneratorTest
 
 # Build uber-JAR (skip tests)
 mvn package -DskipTests
@@ -51,20 +54,32 @@ mvn package -DskipTests
 Scripts live at the repo root (not `scripts/`).
 
 ```bash
-# Run a perf test phase
-./run_perf_test.sh setup
-./run_perf_test.sh publish
-./run_perf_test.sh job a
+# JSON pipeline (rounds 1-4)
+./run_perf_test.sh setup              # create GCP resources
+./run_perf_test.sh publish            # launch JSON publisher
+./run_perf_test.sh job a              # launch Python consumer Job A
+./run_perf_test.sh java-job a         # launch Java JSON consumer Job A
 
-# Tear down GCP resources
-./cleanup_perf_test.sh
+# Avro pipeline (round 5)
+./run_perf_test.sh setup-avro         # create typed BQ tables + build all
+./run_perf_test.sh publish-avro       # launch Avro publisher
+./run_perf_test.sh java-avro-job a    # launch Java Avro consumer Job A
+
+# Kafka pipeline (round 6)
+./run_perf_test.sh setup-kafka        # create Managed Kafka cluster + topic
+./run_perf_test.sh kafka-publish      # launch Kafka Avro publisher
+./run_perf_test.sh kafka-avro-job a   # launch Kafka Avro consumer Job A
+
+# Common
+./run_perf_test.sh monitor            # print monitoring URLs
+./cleanup_perf_test.sh                # tear down GCP resources
 ```
 
 ## Project Structure
 
 ```
 .
-├── run_perf_test.sh                  # Test orchestrator (setup/publish/job/monitor)
+├── run_perf_test.sh                  # Test orchestrator (Pub/Sub + Kafka)
 ├── cleanup_perf_test.sh              # GCP resource teardown
 ├── dataflow_pubsub_to_bq/           # Python package (name must NOT change)
 │   ├── pipeline_json.py             # Consumer pipeline (Pub/Sub -> BQ)
@@ -75,8 +90,18 @@ Scripts live at the repo root (not `scripts/`).
 │       ├── raw_json.py              # ParsePubSubMessageToRawJson DoFn
 │       └── synthetic_messages.py    # Message generation (Avro schema inline)
 ├── tests/                           # pytest (no __init__.py, no conftest.py)
-├── java/                            # Java SDK comparison pipeline
-└── docs/                            # Strategy doc + round result docs
+├── java/
+│   ├── pom.xml
+│   └── src/main/java/.../
+│       ├── PubSubToBigQueryJson.java      # Pub/Sub JSON consumer
+│       ├── PubSubToBigQueryAvro.java      # Pub/Sub Avro consumer
+│       ├── KafkaToBigQueryAvro.java       # Kafka Avro consumer
+│       ├── KafkaAvroPublisher.java        # Kafka Avro publisher
+│       ├── schemas/                       # BQ schema definitions
+│       └── transforms/                    # DoFn implementations
+│   └── src/main/resources/
+│       └── taxi_ride_v1.avsc              # Avro schema (Java source of truth)
+└── docs/                            # Strategy doc + 6 round result docs
 ```
 
 **Critical:** The package name `dataflow_pubsub_to_bq` must not be renamed.
@@ -84,59 +109,25 @@ Scripts live at the repo root (not `scripts/`).
 
 ## Python Code Style
 
-### Language Version
-
 Python 3.12. Use modern syntax exclusively.
 
-### Type Hints
-
-Use builtin generics and union syntax. Only import `Any` from `typing`.
+**Type hints:** Use builtin generics and union syntax. Only import `Any` from `typing`.
 
 ```python
 # Good
 def run(argv: list[str] | None = None) -> None: ...
-def calculate_rates(target_mbps: float) -> dict[str, float]: ...
 
 # Bad -- legacy typing imports
 from typing import List, Optional, Dict
 ```
 
-### Imports
-
-Three groups separated by blank lines: stdlib, third-party, local.
+**Imports:** Three groups separated by blank lines: stdlib, third-party, local.
 Alphabetically sorted within each group.
 
-```python
-import json
-import logging
-
-import apache_beam as beam
-from apache_beam.io.gcp import pubsub
-
-from dataflow_pubsub_to_bq.pipeline_options import PubSubToBigQueryOptions
-```
-
-### Docstrings
-
-Google-style with `Args:`, `Returns:`, `Raises:`, `Yields:` sections.
+**Docstrings:** Google-style with `Args:`, `Returns:`, `Raises:` sections.
 Required on all public functions, classes, and modules.
 
-```python
-def generate_message(message_size_bytes: int) -> str:
-    """Generates a single synthetic taxi ride JSON message.
-
-    Args:
-        message_size_bytes: Target total size of the JSON string in bytes.
-
-    Returns:
-        A JSON string of approximately message_size_bytes bytes.
-
-    Raises:
-        ValueError: If message_size_bytes is less than 250.
-    """
-```
-
-### Naming
+**Naming:**
 
 | Element | Convention | Example |
 |---------|-----------|---------|
@@ -144,31 +135,25 @@ def generate_message(message_size_bytes: int) -> str:
 | Classes | `PascalCase` | `ParsePubSubMessageToRawJson` |
 | Constants (module-level) | `_UPPER_SNAKE_CASE` | `_BQ_METADATA_OVERHEAD_BYTES` |
 
-### Logging
-
-Use `%s` lazy formatting. Do NOT use f-strings in log calls.
+**Logging:** Use `%s` lazy formatting. Do NOT use f-strings in log calls.
 
 ```python
-# Good
 logging.info("Processing %d messages for topic %s", count, topic)
-
-# Bad -- f-string evaluates even when log level is disabled
-logging.info(f"Processing {count} messages for topic {topic}")
 ```
 
-### Error Handling
+**Error handling:**
 
 - Validation errors: raise `ValueError` with a descriptive message.
 - DoFn processing errors: try/except with DLQ routing via `TaggedOutput("dlq", ...)`.
   Capture full stack trace with `traceback.format_exc()`.
 
-### Testing
+**Testing:**
 
 - Framework: `pytest` with standalone functions (no classes, no unittest).
 - File naming: `test_<module>.py` in `tests/`.
 - Function naming: `test_<function>_<scenario>`.
 - Every test function has a one-line docstring.
-- Assertions: bare `assert` statements. Use `pytest.raises(ValueError, match="...")` for exceptions.
+- Assertions: bare `assert` statements. Use `pytest.raises(ValueError, match="...")`.
 - Beam tests: use `TestPipeline`, `assert_that`, `equal_to` from `apache_beam.testing`.
 - No mocks, no fixtures. Prefer in-memory test data.
 
@@ -191,12 +176,14 @@ logging.info(f"Processing {count} messages for topic {topic}")
 - Use `[[ ]]` for tests, `$(command)` for substitution, `(( ))` for arithmetic.
 - Use `local` for function variables.
 - Function naming: `do_<action>` prefix convention.
+- macOS compatibility: use `tr '[:lower:]' '[:upper:]'` instead of `${var^^}`.
 
 ## Key Constraints
 
 - **Package name:** `dataflow_pubsub_to_bq` -- do not rename (breaks shell script imports).
 - **Beam version:** Pinned at 2.70.0 for both Python and Java. Must stay in sync.
-- **No schemas/ directory:** Avro schema is embedded inline in `synthetic_messages.py`.
+- **Avro schema:** Embedded inline in Python (`synthetic_messages.py`), loaded from
+  classpath in Java (`java/src/main/resources/taxi_ride_v1.avsc`). Both must stay in sync.
 - **Scripts at repo root:** `run_perf_test.sh` and `cleanup_perf_test.sh` are at root, not in `scripts/`.
 - **Dependencies:** Managed via `uv` and `pyproject.toml`. No `requirements.txt`.
 - **No CI/CD:** Tests and lint are run manually.

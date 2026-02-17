@@ -109,7 +109,7 @@ Same schema as round 5 (14 columns), with `subscription_name` mapping to the Kaf
 | Streaming Engine | Enabled |
 | Dataflow streaming mode | Exactly-once (default) |
 | Runner | Dataflow Runner V2 |
-| Dynamic routing | `ride_status` field -> 4 BQ tables |
+| Dynamic routing | `ride_status` field --> 4 BQ tables |
 | KafkaIO connector | `KafkaIO.read()` (not Managed IO) |
 | Kafka auth | `.withGCPApplicationDefaultCredentials()` |
 | Kafka consumer config | OOTB: `group.id`, `auto.offset.reset=earliest` only |

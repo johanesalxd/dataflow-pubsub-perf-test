@@ -32,7 +32,7 @@ Key details:
 
 ## 4. Test Architecture
 
-A single Dataflow batch publisher pushes 36M messages to one Pub/Sub topic. Multiple subscriptions on that topic each feed a separate consumer Dataflow job. All consumer jobs write to the same BigQuery table.
+A Dataflow batch publisher pushes synthetic messages to a Pub/Sub topic (or Kafka topic for round 6). Multiple subscriptions (or consumer groups) each feed a separate consumer Dataflow job. All consumer jobs write to the same BigQuery table(s).
 
 ```
                          ┌→ Sub A → Dataflow Job A ─┐
@@ -45,22 +45,22 @@ Publisher (Dataflow)     │                           │
 
 ### Kafka Source Architecture (Round 6)
 
-A Dataflow batch publisher writes 400M Avro messages to a Managed Kafka topic with 32 partitions. Each consumer Dataflow job uses a **separate consumer group** (`perf-a`, `perf-b`) so each independently reads all messages. All consumer jobs write to the same set of BigQuery tables via dynamic routing.
+A Dataflow batch publisher writes 400M Avro messages to a Managed Kafka topic with 32 partitions. Each consumer Dataflow job uses a **separate consumer group** (`perf-a2`, `perf-b2`) so each independently reads all messages. All consumer jobs write to the same set of BigQuery tables via dynamic routing.
 
 ```
-                                  ┌→ ConsumerGroup perf-a → Dataflow Job A ─┐
-Publisher (Dataflow batch)        │   (reads all 32 partitions)             │
-  → Kafka topic (32 partitions) ──┤                                         ├→ BQ: taxi_events_perf_{status}
-                                  │                                         │    (4 tables: enroute, pickup,
-                                  └→ ConsumerGroup perf-b → Dataflow Job B ─┘     dropoff, waiting)
+                                  ┌→ ConsumerGroup perf-a2 → Dataflow Job A ─┐
+Publisher (Dataflow batch)        │   (reads all 32 partitions)              │
+  → Kafka topic (32 partitions) ──┤                                          ├→ BQ: taxi_events_perf_{status}
+                                  │                                          │    (4 tables: enroute, pickup,
+                                  └→ ConsumerGroup perf-b2 → Dataflow Job B ─┘     dropoff, waiting)
 ```
 
 ### Why This Design
 
-- **Single topic, multiple subscriptions:** Each subscription independently receives all messages. One publisher, identical data for every consumer. Fair comparison.
-- **Batch publisher on Dataflow:** Scalable, no local machine bottleneck. Auto-terminates after publishing 36M messages.
-- **`pipeline_json.py`:** Stores the entire payload in a BQ `JSON` column. Minimal CPU overhead isolates the BQ write bottleneck.
-- **Same BQ table:** Reproduces the production scenario where jobs compete for the same table.
+- **Single topic, multiple subscriptions/consumer groups:** Each subscription (Pub/Sub) or consumer group (Kafka) independently receives all messages. One publisher, identical data for every consumer. Fair comparison.
+- **Batch publisher on Dataflow:** Scalable, no local machine bottleneck. Auto-terminates after publishing all messages.
+- **Consumer pipelines:** Python `pipeline_json.py` (rounds 1-3) stores raw JSON in a BQ `JSON` column with minimal CPU overhead. Java pipelines (rounds 4-6) match the production stack with Avro deserialization and dynamic routing.
+- **Same BQ table(s):** Reproduces the production scenario where jobs compete for the same table.
 
 ### Write Method
 
@@ -107,7 +107,7 @@ Creates GCS bucket, BQ table, Pub/Sub topic, N subscriptions, and builds the whe
 
 ### 5.4 Publish Messages
 
-Launches a batch Dataflow job that generates 36M synthetic messages and publishes them to the topic. Each subscription receives a full copy. The job auto-terminates when done.
+Launches a batch Dataflow job that generates synthetic messages (36M for rounds 1-2, 400M for rounds 3-6) and publishes them to the topic. Each subscription receives a full copy. The job auto-terminates when done.
 
 ```bash
 # Launch publisher
@@ -119,7 +119,7 @@ Launches a batch Dataflow job that generates 36M synthetic messages and publishe
 
 **Important:** All subscriptions must exist before publishing. If you need more consumers, increase `NUM_CONSUMERS` in `run_perf_test.sh` and re-run `setup` before publishing.
 
-After the publisher finishes, verify each subscription received the expected data volume (~360 GB):
+After the publisher finishes, verify each subscription received the expected data volume (~360 GB for 10 KB messages, ~200 GB for 500-byte messages, ~35 GB for Avro):
 
 ```bash
 curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
@@ -133,7 +133,7 @@ filter=metric.type%3D%22pubsub.googleapis.com%2Fsubscription%2Fbacklog_bytes%22\
 &aggregation.perSeriesAligner=ALIGN_MEAN"
 ```
 
-Each subscription should show ~360,000,000,000 bytes (~360 GB). If significantly less, the publisher may have failed partway through -- check the Dataflow job logs.
+Each subscription should show the expected data volume for the configured message size. If significantly less, the publisher may have failed partway through -- check the Dataflow job logs.
 
 ### 5.5 Phase 1 -- Single Job Baseline
 
@@ -298,7 +298,7 @@ ORDER BY minute;
 
 ## 8. Cost Estimate
 
-### Per test run (36M messages, 2 consumers)
+### Per Pub/Sub test run (Rounds 1-2: 36M messages, 10 KB, 2 consumers)
 
 | Component | Cost |
 | :--- | :--- |
@@ -310,6 +310,25 @@ ORDER BY minute;
 | **Total** | **~$44.92** |
 
 Each additional consumer adds ~$15 (Pub/Sub delivery + Dataflow workers).
+
+### Per Pub/Sub test run (Rounds 3-5: 400M messages, 500 B / Avro, 2 consumers)
+
+| Component | Cost |
+| :--- | :--- |
+| Pub/Sub publish (35-200 GB) | ~$1.40-$7.80 |
+| Pub/Sub subscribe (35-200 GB x 2 subs) | ~$2.80-$15.60 |
+| Dataflow publisher (5 workers, ~10 min) | ~$0.33 |
+| Dataflow consumers (3 workers each, ~20-35 min) | ~$1.40-$2.40 |
+| **Total** | **~$6-$26** |
+
+### Per Kafka test run (Round 6: 400M messages, Avro, 2 consumer groups)
+
+| Component | Cost |
+| :--- | :--- |
+| Managed Kafka cluster (3 vCPU, ~2 hours) | ~$1.50 |
+| Dataflow publisher (3 workers, ~15 min) | ~$0.50 |
+| Dataflow consumers (3 workers each, ~20 min) | ~$1.40 |
+| **Total** | **~$3.40** |
 
 ### Pricing references
 
@@ -355,8 +374,8 @@ Edit the configuration section at the top of `run_perf_test.sh`:
 | `CONSUMER_MACHINE_TYPE` | `n2-standard-4` | Consumer worker machine type |
 | `PUBLISHER_NUM_WORKERS` | `5` | Workers for the publisher job |
 | `PUBLISHER_MACHINE_TYPE` | `n2-standard-4` | Publisher worker machine type |
-| `NUM_MESSAGES` | `36000000` | Total messages (36M = ~360 GB = ~1 hr at 100 MB/s) |
-| `MESSAGE_SIZE_BYTES` | `10000` | Target size per message in bytes |
+| `NUM_MESSAGES` | `400000000` | Total messages (400M = ~35 GB Avro or ~200 GB JSON) |
+| `MESSAGE_SIZE_BYTES` | `500` | Target size per message in bytes (JSON; Avro is schema-determined) |
 
 ### Scaling test rounds
 
@@ -423,7 +442,7 @@ Round 6 replaced Pub/Sub with Google Managed Kafka as the message source while k
 
 ### Key Discovery
 
-The critical difference between this test and production is **consumer group configuration**. This test uses separate consumer groups (`perf-a`, `perf-b`) so each job reads all 400M messages independently. If production jobs share the same consumer group, Kafka splits partitions between them -- each job gets half the data, not a copy. This exactly explains the observed 200k → 100k per-job degradation pattern.
+The critical difference between this test and production is **consumer group configuration**. This test uses separate consumer groups (`perf-a2`, `perf-b2`) so each job reads all 400M messages independently. If production jobs share the same consumer group, Kafka splits partitions between them -- each job gets half the data, not a copy. This exactly explains the observed 200k → 100k per-job degradation pattern.
 
 ## 11. Conclusion
 
