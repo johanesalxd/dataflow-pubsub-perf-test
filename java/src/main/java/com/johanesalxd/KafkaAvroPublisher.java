@@ -85,7 +85,7 @@ public class KafkaAvroPublisher {
 
       for (int i = 0; i < numMessages; i++) {
         byte[] message = pool.get(i % poolSize);
-        context.output(KV.of(null, message));
+        context.output(KV.of(new byte[0], message));
       }
     }
   }
