@@ -126,6 +126,18 @@ Same schema as round 5 (14 columns), with `subscription_name` mapping to the Kaf
 | DoFn | `PubsubAvroToTableRow` | `KafkaAvroToTableRow` |
 | Network config | Not specified | `--network=default --subnetwork=...` |
 
+## Screenshots
+
+_Note: Dataflow console timestamps are displayed in UTC+8 (Singapore time). Subtract 8 hours to convert to UTC times used throughout this document._
+
+### Dataflow Job Metrics -- Job A
+
+![Dataflow Job Metrics for consumer Job A (dataflow-perf-kafka-avro-a-20260217-113055) showing throughput (elements/sec) peaking at ~400k/s and throughput (estimated bytes/sec) across multiple pipeline steps. Job A ramps up around 11:33 AM UTC+8 (03:33 UTC), reaches steady state at ~400k elements/sec, sustains that rate while Job B runs concurrently, then declines as the Kafka backlog drains around 11:49 AM UTC+8 (03:49 UTC).](../images/round6_dataflow_job_a_metrics.png)
+
+### Dataflow Job Metrics -- Job B
+
+![Dataflow Job Metrics for consumer Job B (dataflow-perf-kafka-avro-b-20260217-113707) showing throughput (elements/sec) peaking at ~400k/s and throughput (estimated bytes/sec) across multiple pipeline steps. Job B ramps up around 11:39 AM UTC+8 (03:39 UTC), reaches the same ~400k elements/sec steady state as Job A with no degradation from Job A's concurrent writes, and continues at full speed after Job A drains.](../images/round6_dataflow_job_b_metrics.png)
+
 ## Timeline Summary
 
 | Phase | Time (UTC) | Duration | Description |
